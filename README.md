@@ -4,9 +4,16 @@ SignalLog is a local-only prototype for tracking check results and summarizing r
 
 ## Local setup
 
+**Database choice:** SignalLog uses SQLite because it is a lightweight, local-only
+prototype and does not need a separate database server. An earlier version
+included an optional PostgreSQL path, but maintaining a second backend added
+setup and dependencies without meeting a current requirement. The project was
+simplified to SQLite so its setup and tests match its intended use. If the
+project's requirements change, a server database can be evaluated then.
+
 SignalLog uses SQLite exclusively. No database server or separate database
 configuration is needed: the app creates and uses `signallog.db` in the project
-root. That local database file is ignored by Git and should not be committed.
+root. That local database file is ignored by Git.
 
 ```bash
 cd D:\Py\SignalLog
