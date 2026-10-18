@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+# Ignore local environment files, but keep the safe templates.
+**/.env
+**/.env.*
+*.db
+*.egg-info/
+.coverage
+htmlcov/
+node_modules/
+.next/
+*.tsbuildinfo
+npm-debug.log*
+web/.env.local
