@@ -22,6 +22,8 @@ type Result = {
   status: "passed" | "failed";
   source: "manual" | "monitor";
   message: string | null;
+  status_code: number | null;
+  latency_ms: number | null;
   recorded_at: string;
 };
 
@@ -37,6 +39,16 @@ type Overview = {
   passed: number;
   failed: number;
   pass_rate: number | null;
+  manual: {
+    total: number;
+    passed: number;
+    failed: number;
+  };
+  monitor: {
+    total: number;
+    passed: number;
+    failed: number;
+  };
   recent_failures: {
     check_id: number;
     check_name: string;
@@ -126,6 +138,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export default function Home() {
   const [range, setRange] = useState(initialRange);
+  const [customRange, setCustomRange] = useState(false);
   const [checkFilter, setCheckFilter] = useState("");
   const [overview, setOverview] = useState<Overview | null>(null);
   const [checks, setChecks] = useState<Check[]>([]);
@@ -147,9 +160,17 @@ export default function Home() {
     if (!backgroundRefresh) setLoading(true);
     setError("");
     try {
+      const selectedRange = customRange ? range : initialRange();
+      if (!customRange) {
+        setRange((current) =>
+          current.from === selectedRange.from && current.to === selectedRange.to
+            ? current
+            : selectedRange,
+        );
+      }
       const params = new URLSearchParams({
-        from: toUtcIso(range.from),
-        to: toUtcIso(range.to),
+        from: toUtcIso(selectedRange.from),
+        to: toUtcIso(selectedRange.to),
       });
       if (checkFilter) params.set("check_id", checkFilter);
       const [summary, checkPage, resultPage] = await Promise.all([
@@ -167,7 +188,7 @@ export default function Home() {
     } finally {
       if (!backgroundRefresh) setLoading(false);
     }
-  }, [checkFilter, range.from, range.to]);
+  }, [checkFilter, customRange, range]);
 
   useEffect(() => {
     void loadDashboard();
@@ -220,10 +241,12 @@ export default function Home() {
       });
       formElement.reset();
       setNotice("Result recorded.");
-      setRange((current) => ({
-        ...current,
-        to: localInputValue(nextMinute(new Date())),
-      }));
+      if (!customRange) {
+        setRange((current) => ({
+          ...current,
+          to: localInputValue(nextMinute(new Date())),
+        }));
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not record result.");
     } finally {
@@ -287,12 +310,29 @@ export default function Home() {
         <div className="range-control">
           <label>
             <span>From</span>
-            <input type="datetime-local" value={range.from} onChange={(event) => setRange((old) => ({ ...old, from: event.target.value }))} />
+            <input type="datetime-local" value={range.from} onChange={(event) => {
+              setCustomRange(true);
+              setRange((old) => ({ ...old, from: event.target.value }));
+            }} />
           </label>
           <span className="range-arrow">→</span>
           <label>
             <span>To</span>
-            <input type="datetime-local" value={range.to} onChange={(event) => setRange((old) => ({ ...old, to: event.target.value }))} />
+            <input type="datetime-local" value={range.to} onChange={(event) => {
+              setCustomRange(true);
+              setRange((old) => ({ ...old, to: event.target.value }));
+            }} />
+          </label>
+          <label className="custom-range-toggle">
+            <input
+              type="checkbox"
+              checked={customRange}
+              onChange={(event) => {
+                setCustomRange(event.target.checked);
+                if (!event.target.checked) setRange(initialRange());
+              }}
+            />
+            <span>Custom range</span>
           </label>
           <label className="filter-select">
             <span>Check</span>
@@ -311,7 +351,9 @@ export default function Home() {
         <article className="metric-card">
           <div className="metric-label">TOTAL RESULTS <span className="metric-icon">↗</span></div>
           <strong>{loading ? "—" : overview?.total ?? 0}</strong>
-          <span className="metric-foot">In the selected period</span>
+          <span className="metric-foot">
+            {loading ? "In the selected period" : `Manual ${overview?.manual.total ?? 0} · Automatic ${overview?.monitor.total ?? 0}`}
+          </span>
         </article>
         <article className="metric-card">
           <div className="metric-label">PASS RATE <span className="metric-icon green">✓</span></div>
@@ -460,13 +502,15 @@ export default function Home() {
         ) : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>CHECK</th><th>OUTCOME</th><th>SOURCE</th><th>MESSAGE</th><th>RECORDED</th></tr></thead>
+              <thead><tr><th>CHECK</th><th>OUTCOME</th><th>SOURCE</th><th>HTTP</th><th>LATENCY</th><th>MESSAGE</th><th>RECORDED</th></tr></thead>
               <tbody>
                 {results.map((result) => (
                   <tr key={result.id}>
                     <td><span className="check-name">{checkNames.get(result.check_id) ?? `Check #${result.check_id}`}</span></td>
                     <td><span className={`result-badge ${result.status}`}>{result.status}</span></td>
                     <td><span className="source-label">{result.source === "monitor" ? "Automatic" : "Manual"}</span></td>
+                    <td>{result.status_code ?? "—"}</td>
+                    <td>{result.latency_ms == null ? "—" : `${result.latency_ms} ms`}</td>
                     <td className="description-cell">{result.message || "—"}</td>
                     <td className="time-cell">{formatDate(result.recorded_at)}</td>
                   </tr>

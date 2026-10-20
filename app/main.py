@@ -1,23 +1,30 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.config import settings
 from app.database import get_db
-from app.monitor import TargetError, validate_target_url
 from app.models import Check, CheckResult
-from app.schemas import CheckCreate, CheckPatch, CheckResponse, OverviewResponse, ResultCreate, ResultResponse
+from app.monitor import TargetError, validate_target_url
+from app.schemas import (
+    CheckCreate,
+    CheckPatch,
+    CheckResponse,
+    OverviewResponse,
+    ResultCreate,
+    ResultResponse,
+)
 
 app = FastAPI(title=settings.app_name)
 app.add_middleware(
@@ -131,7 +138,7 @@ def health_ready(db: Session = Depends(get_db)) -> dict[str, str]:
     try:
         db.execute(text("SELECT 1"))
         return {"status": "ready"}
-    except Exception:
+    except SQLAlchemyError:
         raise HTTPException(status_code=503, detail={"code": "not_ready", "message": "Database is unavailable", "details": []})
 
 
@@ -147,7 +154,7 @@ def parse_datetime(value: str | None, *, default: datetime | None = None) -> dat
         raise HTTPException(status_code=422, detail={"code": "validation_error", "message": "Invalid datetime format", "details": [str(exc)]}) from exc
     if parsed.tzinfo is None:
         raise HTTPException(status_code=422, detail={"code": "validation_error", "message": "Naive datetimes are rejected", "details": []})
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 @app.get("/checks", response_model=dict)
@@ -178,7 +185,7 @@ def create_check(payload: CheckCreate, db: Session = Depends(get_db)) -> Check:
         description=payload.description.strip() if payload.description else None,
         target_url=payload.target_url,
         interval_seconds=payload.interval_seconds,
-        next_check_at=datetime.now(timezone.utc) if payload.target_url and not payload.is_disabled else None,
+        next_check_at=datetime.now(UTC) if payload.target_url and not payload.is_disabled else None,
         is_disabled=payload.is_disabled,
     )
     db.add(item)
@@ -227,7 +234,7 @@ def patch_check(check_id: int, payload: CheckPatch, db: Session = Depends(get_db
 
     if {"is_disabled", "interval_seconds", "target_url"} & changes.keys():
         item.next_check_at = (
-            datetime.now(timezone.utc)
+            datetime.now(UTC)
             if item.target_url is not None and not item.is_disabled
             else None
         )
@@ -271,14 +278,14 @@ def create_result(payload: ResultCreate, db: Session = Depends(get_db)) -> Check
     return item
 
 
-@app.get("/overview", response_model=dict)
+@app.get("/overview", response_model=OverviewResponse)
 def overview(
     from_dt: str | None = Query(default=None, alias="from"),
     to_dt: str | None = Query(default=None, alias="to"),
     check_id: int | None = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    request_time = datetime.now(timezone.utc)
+    request_time = datetime.now(UTC)
     to_value = parse_datetime(to_dt, default=request_time)
     from_value = parse_datetime(from_dt, default=(to_value - timedelta(days=30)))
     if from_value >= to_value:
@@ -291,33 +298,57 @@ def overview(
         if check is None:
             raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Check not found", "details": []})
 
-    stmt = db.query(CheckResult).filter(CheckResult.recorded_at >= from_value, CheckResult.recorded_at < to_value)
+    stmt = db.query(CheckResult.source, CheckResult.status, func.count(CheckResult.id)).filter(
+        CheckResult.recorded_at >= from_value,
+        CheckResult.recorded_at < to_value,
+    )
     if check_id is not None:
         stmt = stmt.filter(CheckResult.check_id == check_id)
 
-    items = stmt.all()
-    total = len(items)
-    passed = sum(1 for item in items if item.status == "passed")
-    failed = sum(1 for item in items if item.status == "failed")
+    source_counts = {
+        "manual": {"total": 0, "passed": 0, "failed": 0},
+        "monitor": {"total": 0, "passed": 0, "failed": 0},
+    }
+    for source, status, count in stmt.group_by(CheckResult.source, CheckResult.status).all():
+        source_counts[source]["total"] += count
+        source_counts[source][status] += count
+
+    total = sum(counts["total"] for counts in source_counts.values())
+    passed = sum(counts["passed"] for counts in source_counts.values())
+    failed = sum(counts["failed"] for counts in source_counts.values())
     pass_rate = round((passed / total) * 100, 2) if total else None
 
-    recent_failures = []
-    for result in sorted((i for i in items if i.status == "failed"), key=lambda r: (r.recorded_at, r.id), reverse=True)[:10]:
-        check = db.get(Check, result.check_id)
-        recent_failures.append(
-            {
-                "check_id": result.check_id,
-                "check_name": check.name if check else "unknown",
-                "message": result.message,
-                "recorded_at": result.recorded_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
-            }
+    failure_query = (
+        db.query(CheckResult, Check.name)
+        .join(Check, Check.id == CheckResult.check_id)
+        .filter(
+            CheckResult.recorded_at >= from_value,
+            CheckResult.recorded_at < to_value,
+            CheckResult.status == "failed",
         )
+    )
+    if check_id is not None:
+        failure_query = failure_query.filter(CheckResult.check_id == check_id)
+    recent_failures = [
+        {
+            "check_id": result.check_id,
+            "check_name": check_name,
+            "message": result.message,
+            "recorded_at": result.recorded_at.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        }
+        for result, check_name in failure_query.order_by(
+            CheckResult.recorded_at.desc(),
+            CheckResult.id.desc(),
+        ).limit(10)
+    ]
 
     return {
         "total": total,
         "passed": passed,
         "failed": failed,
         "pass_rate": pass_rate,
+        "manual": source_counts["manual"],
+        "monitor": source_counts["monitor"],
         "recent_failures": recent_failures,
     }
 

@@ -4,23 +4,41 @@ SignalLog is a local-only prototype for tracking check results and summarizing r
 
 ## Local setup
 
-**Database choice:** SignalLog uses SQLite because it is a lightweight, local-only
-prototype and does not need a separate database server. An earlier version
-included an optional PostgreSQL path, but maintaining a second backend added
-setup and dependencies without meeting a current requirement. The project was
-simplified to SQLite so its setup and tests match its intended use. If the
-project's requirements change, a server database can be evaluated then.
+SignalLog uses SQLite exclusively; no database server is required. The app
+creates `signallog.db` in the repository root. Back up that file before
+upgrading an existing database. Optional local settings can be configured by
+copying `.env.example` to `.env` if one does not already exist, then editing it.
 
-SignalLog uses SQLite exclusively. No database server or separate database
-configuration is needed: the app creates and uses `signallog.db` in the project
-root. That local database file is ignored by Git.
+Run these commands from the repository root.
+
+**Windows (PowerShell):**
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m alembic upgrade head
+```
+
+To create the optional settings file without overwriting an existing one:
+
+```powershell
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
+```
+
+**Linux/macOS:**
 
 ```bash
-cd D:\Py\SignalLog
-python -m venv .venv
-.venv\Scripts\python -m pip install -U pip
-.venv\Scripts\python -m pip install -e .
-.venv\Scripts\alembic upgrade head
+python3.12 -m venv .venv
+./.venv/bin/python -m pip install --upgrade pip
+./.venv/bin/python -m pip install -e ".[dev]"
+./.venv/bin/python -m alembic upgrade head
+```
+
+To create the optional settings file without overwriting an existing one:
+
+```bash
+test -f .env || cp .env.example .env
 ```
 
 ## Known limitations
@@ -29,23 +47,60 @@ python -m venv .venv
 - SQLite is the only supported database backend.
 - No idempotency keys.
 - Offset pagination can shift under concurrent writes.
-- No retention or archival policy for results.
+- No alerting or consecutive-failure logic.
+- Postgres support and a router/service-layer split are deferred.
+- No retention or archival policy for results. Twenty checks at one-minute
+  intervals generate about 864,000 results in 30 days; retention is the next
+  data-growth concern.
 - Automated checks currently support HTTP/HTTPS GET only, with public hosts on
   standard ports (80/443); no TCP, script, browser, or private-network checks.
 - Results can also be submitted manually. The monitor worker must be running
   for scheduled checks.
 
+## Definitions
+
+- An automated result passes only when the HTTP response status is 2xx.
+- Redirects are not followed. A 3xx response fails and explains that the final
+  URL should be configured directly.
+- 4xx, 5xx, connection errors, timeouts, and DNS errors fail. Status codes are
+  recorded when an HTTP response exists; DNS and network failures have no
+  status code.
+- `latency_ms` measures an automated check from validation/DNS lookup through
+  its HTTP response or failure. Checks stopped by the overall 10-second
+  timeout record 10,000 ms. The latest-results table shows both fields;
+  manual results have no HTTP status code or latency.
+- The dashboard pass rate combines manual and automated results. The overview
+  also returns separate manual and automated totals, passes, and failures.
+  Historical rows predating these fields keep null status/latency values; they
+  remain part of the existing pass-rate calculation.
+
 ## Quick start
 
-```bash
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+**Windows (PowerShell):**
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-In a separate terminal, start the single monitor worker:
+**Linux/macOS:**
 
 ```bash
-cd D:\Py\SignalLog
-.venv\Scripts\python.exe -m app.monitor
+./.venv/bin/python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+In a separate terminal at the repository root, start the single monitor
+worker:
+
+**Windows (PowerShell):**
+
+```powershell
+.\.venv\Scripts\python.exe -m app.monitor
+```
+
+**Linux/macOS:**
+
+```bash
+./.venv/bin/python -m app.monitor
 ```
 
 Run the Alembic migration command in the setup section before starting the API.
@@ -62,8 +117,8 @@ on trusted local infrastructure; neither service has authentication.
 In a second terminal:
 
 ```bash
-cd D:\Py\SignalLog\web
-npm install
+cd web
+npm ci
 npm run dev
 ```
 
@@ -77,12 +132,35 @@ The API allows browser requests from `http://localhost:3000`.
 
 Run the backend test suite with:
 
+**Windows (PowerShell):**
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_signallog.py -q
+.\.venv\Scripts\ruff.exe check .
+.\.venv\Scripts\mypy.exe app tests
+```
+
+**Linux/macOS:**
+
 ```bash
-.venv\Scripts\python.exe -m pytest tests\test_signallog.py -q
+./.venv/bin/python -m pytest tests/test_signallog.py -q
+./.venv/bin/ruff check .
+./.venv/bin/mypy app tests
 ```
 
 Tests use an isolated in-memory SQLite database and do not modify the local
 `signallog.db`.
+
+For the dashboard:
+
+```bash
+cd web
+npm ci
+npm run typecheck
+npm run build
+```
+
+The backend and web checks run in GitHub Actions on pushes and pull requests.
 
 ## API notes
 

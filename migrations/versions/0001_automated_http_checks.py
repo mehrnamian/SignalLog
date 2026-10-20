@@ -4,8 +4,8 @@ Revision ID: 0001_http_checks
 Revises:
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0001_http_checks"
 down_revision = None
@@ -118,8 +118,17 @@ def downgrade() -> None:
         for name in ("ix_check_results_check_id", "ix_check_results_id"):
             if name in indexes:
                 op.drop_index(name, table_name="check_results")
-        if "source" in _column_names(connection, "check_results"):
-            op.drop_column("check_results", "source")
+        result_constraints = sa.inspect(connection).get_check_constraints("check_results")
+        source_constraint = any(
+            constraint.get("name") == "cc_check_result_source"
+            for constraint in result_constraints
+        )
+        if "source" in _column_names(connection, "check_results") or source_constraint:
+            with op.batch_alter_table("check_results", recreate="always") as batch_op:
+                if source_constraint:
+                    batch_op.drop_constraint("cc_check_result_source", type_="check")
+                if "source" in _column_names(connection, "check_results"):
+                    batch_op.drop_column("source")
 
     if "checks" in sa.inspect(connection).get_table_names():
         indexes = _index_names(connection, "checks")
@@ -127,6 +136,34 @@ def downgrade() -> None:
             if name in indexes:
                 op.drop_index(name, table_name="checks")
         existing = _column_names(connection, "checks")
-        for name in ("last_checked_at", "next_check_at", "interval_seconds", "target_url"):
-            if name in existing:
-                op.drop_column("checks", name)
+        interval_constraint = any(
+            constraint.get("name") == "cc_check_interval_range"
+            for constraint in sa.inspect(connection).get_check_constraints("checks")
+        )
+        columns_to_drop = [
+            name
+            for name in ("last_checked_at", "next_check_at", "interval_seconds", "target_url")
+            if name in existing
+        ]
+        if columns_to_drop or interval_constraint:
+            if connection.dialect.name == "sqlite":
+                # SQLite cannot rebuild a referenced table with foreign-key checks enabled.
+                with op.get_context().autocommit_block():
+                    connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+                    try:
+                        with op.batch_alter_table("checks", recreate="always") as batch_op:
+                            if interval_constraint:
+                                batch_op.drop_constraint("cc_check_interval_range", type_="check")
+                            for name in columns_to_drop:
+                                batch_op.drop_column(name)
+                    finally:
+                        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+                    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").all()
+                    if violations:
+                        raise RuntimeError(f"Foreign key violations after checks downgrade: {violations}")
+            else:
+                with op.batch_alter_table("checks", recreate="always") as batch_op:
+                    if interval_constraint:
+                        batch_op.drop_constraint("cc_check_interval_range", type_="check")
+                    for name in columns_to_drop:
+                        batch_op.drop_column(name)

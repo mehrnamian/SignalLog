@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import DateTime
 from sqlalchemy.engine import Dialect
@@ -17,7 +17,7 @@ class UTCDateTime(TypeDecorator[datetime]):
             return None
         if value.tzinfo is None:
             raise ValueError("Naive datetimes cannot be stored.")
-        value = value.astimezone(timezone.utc)
+        value = value.astimezone(UTC)
         if dialect.name == "sqlite":
             return value.replace(tzinfo=None)
         return value
@@ -26,5 +26,5 @@ class UTCDateTime(TypeDecorator[datetime]):
         if value is None:
             return None
         if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)

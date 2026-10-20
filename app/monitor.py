@@ -7,8 +7,9 @@ import ipaddress
 import logging
 import socket
 import ssl
+import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit, urlunsplit
 
 from sqlalchemy import or_, update
@@ -31,6 +32,14 @@ class DueCheck:
     id: int
     target_url: str
     interval_seconds: int
+
+
+@dataclass(frozen=True)
+class CheckOutcome:
+    status: str
+    message: str
+    status_code: int | None
+    latency_ms: int
 
 
 class TargetError(ValueError):
@@ -77,7 +86,7 @@ def _public_addresses(host: str, port: int) -> list[str]:
     except OSError as exc:
         raise TargetError("DNS lookup failed.") from exc
 
-    addresses = list(dict.fromkeys(record[4][0] for record in records))
+    addresses = list(dict.fromkeys(str(record[4][0]) for record in records))
     if not addresses:
         raise TargetError("DNS lookup returned no addresses.")
     try:
@@ -101,13 +110,14 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     def __init__(self, host: str, port: int, address: str) -> None:
-        super().__init__(host, port, timeout=REQUEST_TIMEOUT_SECONDS, context=ssl.create_default_context())
+        self.ssl_context = ssl.create_default_context()
+        super().__init__(host, port, timeout=REQUEST_TIMEOUT_SECONDS, context=self.ssl_context)
         self.address = address
 
     def connect(self) -> None:
         raw_socket = socket.create_connection((self.address, self.port), self.timeout)
         try:
-            self.sock = self._context.wrap_socket(raw_socket, server_hostname=self.host)
+            self.sock = self.ssl_context.wrap_socket(raw_socket, server_hostname=self.host)
         except Exception:
             raw_socket.close()
             raise
@@ -133,26 +143,34 @@ def _request_one_address(url: str, address: str) -> int:
         connection.close()
 
 
-def perform_check(url: str) -> tuple[str, str]:
+def perform_check(url: str) -> CheckOutcome:
+    started_at = time.perf_counter()
     try:
         host, port, _, _ = validate_target_url(url)
         addresses = _public_addresses(host, port)
-        last_error: OSError | None = None
+        last_error: Exception | None = None
         for address in addresses:
             try:
                 status = _request_one_address(url, address)
-                if 200 <= status < 400:
-                    return "passed", f"HTTP {status}"
-                return "failed", f"HTTP {status}"
+                if 200 <= status < 300:
+                    return CheckOutcome("passed", f"HTTP {status}", status, _elapsed_ms(started_at))
+                message = f"HTTP {status}"
+                if 300 <= status < 400:
+                    message += " (redirect not followed; use the final URL)"
+                return CheckOutcome("failed", message, status, _elapsed_ms(started_at))
             except (OSError, http.client.HTTPException, ssl.SSLError, TimeoutError) as exc:
                 last_error = exc
         if isinstance(last_error, (TimeoutError, socket.timeout)):
-            return "failed", "Request timed out."
+            return CheckOutcome("failed", "Request timed out.", None, _elapsed_ms(started_at))
         if last_error is not None:
-            return "failed", "Could not connect to target."
-        return "failed", "Could not connect to target."
+            return CheckOutcome("failed", "Could not connect to target.", None, _elapsed_ms(started_at))
+        return CheckOutcome("failed", "Could not connect to target.", None, _elapsed_ms(started_at))
     except TargetError as exc:
-        return "failed", str(exc)
+        return CheckOutcome("failed", str(exc), None, _elapsed_ms(started_at))
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return round((time.perf_counter() - started_at) * 1000)
 
 
 def _claim_due_checks(db: Session, now: datetime) -> list[DueCheck]:
@@ -169,26 +187,28 @@ def _claim_due_checks(db: Session, now: datetime) -> list[DueCheck]:
     )
     claimed: list[DueCheck] = []
     for check in due:
-        claim = db.execute(
-            update(Check)
-            .where(
+        claim = (
+            db.query(Check)
+            .filter(
                 Check.id == check.id,
                 Check.is_disabled.is_(False),
                 Check.target_url == check.target_url,
                 Check.interval_seconds == check.interval_seconds,
                 or_(Check.next_check_at.is_(None), Check.next_check_at <= now),
             )
-            .values(next_check_at=now + timedelta(seconds=check.interval_seconds))
-            .execution_options(synchronize_session=False)
+            .update(
+                {Check.next_check_at: now + timedelta(seconds=check.interval_seconds)},
+                synchronize_session=False,
+            )
         )
-        if claim.rowcount == 1:
+        if claim == 1 and check.target_url is not None:
             claimed.append(DueCheck(check.id, check.target_url, check.interval_seconds))
     db.commit()
     return claimed
 
 
 async def run_due_checks(now: datetime | None = None) -> int:
-    run_at = now or datetime.now(timezone.utc)
+    run_at = now or datetime.now(UTC)
     with SessionLocal() as db:
         due_checks = _claim_due_checks(db, run_at)
 
@@ -197,32 +217,34 @@ async def run_due_checks(now: datetime | None = None) -> int:
     async def execute(check: DueCheck) -> None:
         async with semaphore:
             try:
-                status, message = await asyncio.wait_for(
+                outcome = await asyncio.wait_for(
                     asyncio.to_thread(perform_check, check.target_url),
                     timeout=TOTAL_CHECK_TIMEOUT_SECONDS,
                 )
             except TimeoutError:
-                status, message = "failed", "Request timed out."
+                outcome = CheckOutcome("failed", "Request timed out.", None, TOTAL_CHECK_TIMEOUT_SECONDS * 1000)
             with SessionLocal() as db:
                 db.add(
                     CheckResult(
                         check_id=check.id,
-                        status=status,
+                        status=outcome.status,
                         source="monitor",
-                        message=message[:1000],
+                        message=outcome.message[:1000],
+                        status_code=outcome.status_code,
+                        latency_ms=outcome.latency_ms,
                     )
                 )
                 db.execute(
                     update(Check)
                     .where(Check.id == check.id)
-                    .values(last_checked_at=datetime.now(timezone.utc))
+                    .values(last_checked_at=datetime.now(UTC))
                     .execution_options(synchronize_session=False)
                 )
                 db.commit()
             logger.info(
                 "monitor_result check_id=%s status=%s interval_seconds=%s",
                 check.id,
-                status,
+                outcome.status,
                 check.interval_seconds,
             )
 

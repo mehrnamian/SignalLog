@@ -6,6 +6,7 @@ __pycache__/
 # Ignore local environment files, but keep the safe templates.
 **/.env
 **/.env.*
+!**/.env.example
 *.db
 *.egg-info/
 .coverage

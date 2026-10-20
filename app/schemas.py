@@ -133,6 +133,21 @@ class ResultResponse(BaseModel):
     status: Literal["passed", "failed"]
     source: Literal["manual", "monitor"]
     message: str | None = None
+    status_code: int | None = None
+    latency_ms: int | None = None
+    recorded_at: datetime
+
+
+class OverviewSourceCounts(BaseModel):
+    total: int
+    passed: int
+    failed: int
+
+
+class RecentFailure(BaseModel):
+    check_id: int
+    check_name: str
+    message: str | None
     recorded_at: datetime
 
 
@@ -141,4 +156,6 @@ class OverviewResponse(BaseModel):
     passed: int
     failed: int
     pass_rate: float | None
-    recent_failures: list[dict]
+    manual: OverviewSourceCounts
+    monitor: OverviewSourceCounts
+    recent_failures: list[RecentFailure]

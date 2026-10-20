@@ -49,6 +49,8 @@ h1 { margin-bottom: 7px; font: 800 clamp(28px, 3vw, 36px)/1.15 "Manrope", sans-s
 .range-control label, .form-stack label { display: flex; flex-direction: column; gap: 6px; color: #74817c; font-size: 10px; font-weight: 700; letter-spacing: .4px; }
 .range-control input, .range-control select { height: 36px; min-width: 166px; border: 1px solid var(--line); border-radius: 8px; padding: 0 9px; outline: none; color: #34443e; font-size: 11px; background: white; }
 .range-control select { min-width: 130px; }
+.range-control label.custom-range-toggle { flex-direction: row; align-items: center; gap: 6px; padding-bottom: 10px; white-space: nowrap; }
+.range-control .custom-range-toggle input { width: 14px; height: 14px; min-width: 0; margin: 0; accent-color: var(--green); }
 .range-control input:focus, .range-control select:focus, .form-stack input:focus, .form-stack select:focus { border-color: #87bda5; box-shadow: 0 0 0 3px rgba(21,123,97,.08); }
 .range-arrow { padding-bottom: 9px; color: #a5b0ab; }
 

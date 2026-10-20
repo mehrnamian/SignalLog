@@ -1,6 +1,14 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Index, Integer, String, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -38,6 +46,8 @@ class CheckResult(Base):
     __table_args__ = (
         CheckConstraint("status IN ('passed', 'failed')", name="cc_check_result_status"),
         CheckConstraint("source IN ('manual', 'monitor')", name="cc_check_result_source"),
+        Index("ix_check_results_recorded_at", "recorded_at"),
+        Index("ix_check_results_check_id_recorded_at", "check_id", "recorded_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
@@ -45,6 +55,8 @@ class CheckResult(Base):
     status: Mapped[str] = mapped_column(String(10), nullable=False)
     source: Mapped[str] = mapped_column(String(10), nullable=False, default="manual", server_default="manual")
     message: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     recorded_at: Mapped[datetime] = mapped_column(UTCDateTime(), server_default=func.now(), nullable=False)
 
     check: Mapped[Check] = relationship(back_populates="results")
