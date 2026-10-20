@@ -4,10 +4,10 @@ SignalLog is a local-only prototype for tracking check results and summarizing r
 
 ## Local setup
 
-SignalLog uses SQLite exclusively; no database server is required. The app
-creates `signallog.db` in the repository root. Back up that file before
-upgrading an existing database. Optional local settings can be configured by
-copying `.env.example` to `.env` if one does not already exist, then editing it.
+SignalLog uses SQLite exclusively; no database server is required.
+The app creates `signallog.db` in the repository root.
+Before upgrading an existing database, stop the API and the monitor worker, then copy signallog.db (and any -wal or -shm files beside it).
+Optional local settings can be configured by copying `.env.example` to `.env` if one does not already exist, then editing it.
 
 Run these commands from the repository root.
 
